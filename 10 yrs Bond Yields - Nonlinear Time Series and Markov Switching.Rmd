@@ -1,0 +1,291 @@
+---
+title: 'Analyzing Bond Spreads: Nonlinear Models and Markov Switching'
+author: "Marcel R. Penda"
+date: "2024-13-03"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+
+# Setup & Libraries
+```{r}
+#Libraries
+library(pacman)
+p_load(
+  # General
+  readxl, stargazer, skimr, dplyr, tidyverse, psych, skimr, ggpubr, 
+  
+  # Time Series
+  xts, POT, astsa, tis, plm, extRemes, fExtremes, nonlinearTseries, 
+  
+  # Distributions
+  fitdistrplus, actuar, VGAM, ismev, VaRES, car, CircStats, qqconf,
+  
+  # Copulas
+  copula, scatterplot3d, ggplot2, grid, MASS, mnormt, fGarch, VineCopula, BiocManager, mvtnorm, sn, 
+  
+  # Markov Regime Switching?
+  tsDyn, xts, dygraphs, ggpubr, olsrr, broom, nonlinearTseries, MSwM, readxl,
+  
+  # Tests
+  strucchange,
+  
+  #Marx
+  matlab, metRology
+)
+
+
+# Deactivate scientific notation
+options(scipen = 999) 
+
+# Set Working Directory
+# wd = "YOUR-WORKING-DIRECTORY"
+# setwd("")
+
+```
+
+
+# Read Data
+```{r}
+# Read bond data
+bonds <- read_excel("base_bond_equity.xls",
+                   col_names = TRUE)
+
+# # Remove redundant date cols
+# date_name = seq(2,7,1)
+# for (i in date_name) {
+#   column_name <- paste("Date...", i, sep = "")
+#   bonds[[column_name]] <- NULL
+# }
+# 
+# Rename cols
+# Change name for data
+# colnames(bonds)[1] <- "date"
+
+## Change names for country bonds
+new_names = c("Date1", "France", "Date2","Portugal", "Date3", "Netherlands", "Date4", "Belgium")
+pos = seq(1,8,1)
+for (x in pos) {
+  colnames(bonds)[pos] <- new_names[pos]
+}
+
+
+# Create time series object for France 10yrs bond yields
+frabonds <- xts(bonds[,c("Date1", "France")], order.by = bonds$Date1)
+
+# Create time series object for Belgian 10yrs bond yields
+belgium <- bonds[,c("Date4", "Belgium")] # Create dataframe
+belgium <- na.omit(belgium) # omit NAs
+belbonds <- xts(belgium[,c("Date4", "Belgium")], order.by = belgium$Date4) #create ts.object
+
+```
+
+
+## Data Preperation
+A yield spread measures the difference between the yields of two different bonds, which could have different maturities, credit ratings, issuers, or risk levels. To calculate a yield spread, you simply subtract the yield of one bond from the yield of the other. Typically, this difference is expressed in basis points (bps) or percentage points (source: https://www.investopedia.com/terms/y/yieldspread.asp).
+
+To investigate the bond yield spreads between two countries, we chose the countries of France and Belgium. Therefore, we use the Portuguese bond yield as reference due to the coherence of the time series of all three countries. Note that we calculate the daily and not annualized yield spreads which is usually done. 
+
+Before doing the data analysis and comparing the spreads, we need to prepare the data to obtain the yield spreads of the two countries of interest based on the Portuguese 10yrs bond yields. Moreover, usually, the US Bond Yields are considered to calculate yield spreads. However, given the data, we chose Portugal as reference bond yield.
+
+```{r}
+# Create and sort time series for the Portuguese Bond Yields.Start with Potugal, since it's the shortes time series starting in 1995-08-28 (resticting the others).
+Portugal <- bonds[,c("Date2","Portugal")]
+Portugal <- Portugal[order(Portugal$Date2),]
+Portugal <- na.omit(Portugal)
+Portugal <- Portugal[4:nrow(Portugal),] # Start in new week, i.e. at fourth value
+
+# Continue with Belgium
+Belgium <- bonds[,c("Date4","Belgium")]
+Belgium <- Belgium[order(Belgium$Date4),]
+Belgium <- Belgium[527:nrow(Belgium),] # Get same time series dates as for Portugal
+Belgium <- na.omit(Belgium)
+
+# Same for France
+France <- bonds[,c("Date1","France")]
+France <- France[order(France$Date1),]
+France <- France[7303:nrow(France),] # Get same series as for other two (France is longest series)
+
+#1 Compute daily growth rate in percentage for Belgian, Portuguese & French bond yields
+fra <- 100*diff(log(France$France), lag = 1)
+bel <- 100*diff(log(Belgium$Belgium), lag = 1)
+port <- 100*diff(log(Portugal$Portugal), lag = 1)
+
+#2 Subtract Portugal bond from the belg. & french yields to obtain yield spreads
+fraspread <- fra - port
+belspread <- bel - port
+```
+
+## 2.1 Markov-Switching Model
+
+$$
+(Y_{it}) - Y_{gt} = \alpha_i + \beta_{ij}(L)[(Y_{jt}) - Y_{gt}] + \epsilon_{ijt}
+
+$$
+#### Identifying Best Lags
+
+To obtain the best lag for our linear time series model (underlying model for the Markov Switching model), we can apply the ccf function where the lag k value returned by ccf(x, y) estimates the correlation between x[t+k] and y[t].
+```{r}
+# Compute the cross-correlation function between Fordex and SPex excess returns to identify the best lag
+ccf_spreads <- ccf(belspread, fraspread, lag.max = 10)
+ccf_spreads
+```
+The ccf plot and results indicate a positive correlation between the French and Belgian Spreads for the lag of t-1 and a rather weak negative correlation for the lag t--, t-6 and t-7.Thus belspread[t-1] represents an intering candidatetobe included in a linear or non-linear model.
+
+Thus, we estimate a Markov switching model based on a linear model with lag t-1.
+
+#### Underlying Model
+
+1)  Linear model with lag t-1
+```{r}
+# We create the shifted 
+ninf = length(fraspread)
+
+y <- fraspread[2:ninf] # t
+y <- na.omit(y)
+length(y)
+
+x1 <- belspread[1:(ninf-1)] # t-1
+x1<- na.omit(x1)
+length(x1)
+
+# Define AR(1) model by using OLS
+ms_lmodel1 = lm(y ~ x1)
+summary(ms_lmodel1)
+```
+The causal linear model with the lagged independent explanatory variable belspread[t-1] shows a statistically significant (p-value < 0.05) positive effect on the French yield spreads (coefficient of 0.090583). In other words, according to our model the fraspreads of month [t] (e.g. Mai) are in average 0.090583 times the belspread of the preceding month [t-1] (i.e. March).
+
+However, the model was estimated with 4870  degrees of freedom and explains only 0.7% (R2 value) of the variation in our times series data. Thus, a linear relationship between the two time series is rather unlikely. In a next step, we estimate a MS model with two regimes based on this model.
+
+Thus, we apply some non-linearity tests.
+Non-Linearity Test
+```{r}
+# Extract the residuals from the linear model
+residuals <- ms_lmodel1$residuals
+
+# Check for non-linearity in residuals
+nonlinearityTest(residuals,verbose=TRUE)
+```
+
+The above-performed tests check for the null hypothesis that there is linearity in the mean of the residuals or if the time seriesi follows a linear AR process. The low p-values (with values <0.05) for the Likelihood ratio,Teraesvirta Neural Network, McLeod-Li test, Tsay's and Keenan's tests provide evidence against the null hypothesis, i.e. against linearity. We have empirical evidence to reject the null hypothesis, i.e. it is probable that the dynamics are non-linear . This is in line with the interpretation of the linear model results.
+
+
+#### Model Estimation
+The following combinations and results were obtained by manually
+executing the Markov Switching models and allowing the intercept,
+coefficients and variance to switch between regimes correspondingly.
+
+Model         AIC         BIC         Log-Liklihood
+
+ms_lmodel1 &
+MSIAH:        system is singular (no differences in regimes)
+MSIH:         1066.679    1090.066    -530.3394
+MSI:          1121.163    1144.55     -557.5816
+
+
+
+According to the AIC, BIC and Log-likelihood results, we can observe that the MSIAH and MSIH Markov Switching models with the ms_model3 (and its lag-structure of three lagged variables, i.e. x_t-1, x_t-4, x_t-8) represent the best MS model.
+
+
+##### a) MSIAH Model
+First we estimate a MSIAH model with changing intercept, coefficient and variance
+```{r}
+# ms1 = msmFit(ms_lmodel1,  # predefined linear model
+#             k = 2, # number of regimes
+#             sw = c(TRUE, TRUE, TRUE), # intercept, coefficient, std. error
+#             control = list(parallel = FALSE))
+# summary(ms1)
+# plotProb(ms1, 2)
+```
+For the MISHA model, we obtain a singular system, i.e. for the completely flexible approach allowing intercept, variance and coefficient switch between regimes we obtain the same model for both regimes.
+
+
+##### b) MSIH Model
+Second, we estimate a MSIH model with changing intercept and variance, but fixed coefficient.
+```{r}
+# # 2) MSIH model (MLE) with changing intercept and variance
+# ms2 = msmFit(ms_lmodel1,  # predefined linear model
+#             k = 2, # number of regimes
+#             sw = c(TRUE, FALSE, TRUE), # intercept, coefficient, std. error
+#             control = list(parallel = FALSE))
+# summary(ms2)
+# plotProb(ms2,2)
+```
+Similarily for the second model,i.e. MSIH, we obtain a singular system,indicating now difference between regimes.
+
+
+##### c) MSI Model
+Third, we estimate a MSIH model with fixed coefficient and variance, and changing intercept
+```{r}
+# 2) MSIH model (MLE) with changing intercept and variance
+ms3 = msmFit(ms_lmodel1,  # predefined linear model
+            k = 2, # number of regimes
+            sw = c(TRUE, FALSE, FALSE), # intercept, coefficient, std. error
+            control = list(parallel = FALSE))
+summary(ms3)
+plotProb(ms3,2)
+```
+For our last model, we obtain a non-singular modelwith an intercept of -0.008551485 in the first and 0.015558646 in the second regime. We obtain the following transition probabilities:
+
+          Regime 1  Regime 2
+Regime 1 0.4955831 0.4990131
+Regime 2 0.5044169 0.5009869
+
+The model was estimated with an AIC of 14749.6 and a log Liklihood of -7371.8. Since we have no other model variations as comparison, any interpretation about the goodness of fit are rather vague.
+
+However, looking at the plotted probabilities yields that the second regime (thin grey areas) clearly captures the high volatility time series data. In contrast, the first regime captrues the relatively less volatile time series (to be well observed in the range [2000,3000]). Concluded, the MSI (only allowing the intercept to change) provides the best MS-Model considereing a linera underlying model with one lagged variable of belspread[t-1].
+
+
+## 2.2 STAR Model
+Given the ACF plots of Exercise 4, section vii), we know the following lagged values correlated with the current yield French and Belgian spreads:
+
+fraspread: t-1
+belspread: t-1
+
+A) French Yield Spreads
+```{r}
+# Define the exponential model
+lstar_model <- star(fraspread, 
+                   m = 1, # number of lagged values (6 month based on ACF)
+                   d = 1, # smoothness of transition function (the higher the smoother)
+                   segments = 2, # number of regimes
+                   gamma = 0.5, # starting value to estimate the gamma
+                   trim = 0.1, # at least 10% of data in each regime
+                   model = "logistic")
+summary(lstar_model)
+```
+Estimating the an LSTAR model for the fraspread time series, yields the following results:
+residuals variance = 1.196,  AIC = 899, MAPE = 136.5%
+
+Given the very high residual variance and the fact that our predictions are 136% larger/smaller than the origianl values, indicates a rather poor model fit.
+
+B) Belgian Yield Spreads
+For the belspread time series, we fit an exponential model for the sake of variation (see more detailed comparison of both logisitc and exponential models in Section 2.2).
+```{r}
+# Define the exponential model
+lstar_model <- star(belspread, 
+                   m = 1, # number of lagged values (6 month based on ACF)
+                   d = 1, # smoothness of transition function (the higher the smoother)
+                   segments = 2, # number of regimes
+                   gamma = 0.5, # starting value to estimate the gamma
+                   trim = 0.1, # at least 10% of data in each regime
+                   model = "exponential")
+summary(lstar_model)
+```
+Even though for the belspread time series, we obtain a lower AIC but an even worse values for the MAPE.
+
+However, we get gamma = 0.7633972 for our transition function from Regime 1 to regime 2. Thus, we can plot the corresponding transition function:
+
+### Transition function
+```{r}
+curve(1/(1+exp(-0.7633972*x)), -5, 5, col="red", xlab="y(t-d)-c", ylab="y",main="Logistic Transition Function - ESTAR Model") 
+legend(0.1,0.98,"gamma=0.76",bty="n") 
+```
+The transition function (compared to the plotted transition functions in Section 2.2) is relatively smooth.
+
+```{r}
+knitr::purl("10 yrs Bond Yields - Nonlinear Time Series and Markov Switching.Rmd", documentation = 2)
+```
+
